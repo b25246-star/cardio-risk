@@ -1,0 +1,15 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+
+# Secrets and OS / editor files
+.env
+.DS_Store
+Thumbs.db
+.vscode/
