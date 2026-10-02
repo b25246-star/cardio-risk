@@ -1,22 +1,24 @@
 """FastAPI backend for the cardio-risk dashboard.
 
-Run from the project root:
-    uvicorn backend.api:app --reload --port 8000
-or from inside backend/:
-    uvicorn api:app --reload --port 8000
+Run from inside backend/:   uvicorn api:app --reload --port 8000
 Interactive docs: http://localhost:8000/docs
+Env: CORS_ORIGINS=comma,separated,origins  (default: Vite dev server)
 """
 import json
+import os
 import sys
+import threading
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))   # so `from common import` works
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 import explain
@@ -26,16 +28,16 @@ from common import (CONSTANT_COLS, LEAKAGE_COLS, MODELS_DIR, TARGETS,
 DISCLAIMER = ("Decision-support / educational use only. Predictions are statistical "
               "estimates and are NOT a substitute for formal diagnostic imaging "
               "(e.g. coronary angiography) or clinical judgement.")
-
 VESSELS = ["LAD", "LCX", "RCA"]
+MAX_TOP_K = 30
 
-# ------------------------------------------------------------------ data + schema
+# ------------------------------------------------------------------ data + schema (built once)
 RAW = load_raw()
 INPUT_COLS = [c for c in RAW.columns if c not in LEAKAGE_COLS + CONSTANT_COLS]
+LABELS = {k: v.tolist() for k, v in make_targets(RAW).items()}   # was recomputed per request
 
 
 def build_schema() -> dict:
-    """Describe every model input so the frontend can build the form dynamically."""
     schema = {}
     for c in INPUT_COLS:
         s = RAW[c]
@@ -56,11 +58,9 @@ SCHEMA = build_schema()
 
 
 def build_row(features: dict[str, Any]):
-    """Raw user input (partial allowed) -> 1-row raw DataFrame, missing filled with defaults."""
     unknown = [k for k in features if k not in SCHEMA]
     if unknown:
         raise HTTPException(422, f"Unknown feature(s): {unknown}. See GET /schema.")
-
     values = {c: SCHEMA[c]["default"] for c in INPUT_COLS}
     warnings = []
     for k, v in features.items():
@@ -79,12 +79,10 @@ def build_row(features: dict[str, Any]):
             if match is None:
                 raise HTTPException(422, f"'{k}' must be one of {spec['options']}, got {v!r}")
             values[k] = match
-
     row = pd.DataFrame([values])
-    for c in INPUT_COLS:                       # keep dtypes identical to training data
+    for c in INPUT_COLS:
         row[c] = row[c].astype(RAW[c].dtype)
-    defaults_used = [c for c in INPUT_COLS if c not in features]
-    return row, defaults_used, warnings
+    return row, [c for c in INPUT_COLS if c not in features], warnings
 
 
 # ------------------------------------------------------------------ risk helpers
@@ -93,11 +91,9 @@ def risk_level(p: float) -> str:
 
 
 def risk_color(p: float) -> str:
-    """green -> amber -> red, for the 3D artery material."""
     g, a, r = (34, 197, 94), (250, 204, 21), (239, 68, 68)
     lo, hi, t = (g, a, p * 2) if p < 0.5 else (a, r, (p - 0.5) * 2)
-    c = [round(lo[i] + (hi[i] - lo[i]) * t) for i in range(3)]
-    return "#%02x%02x%02x" % tuple(c)
+    return "#%02x%02x%02x" % tuple(round(lo[i] + (hi[i] - lo[i]) * t) for i in range(3))
 
 
 def summarize(res: dict) -> dict:
@@ -105,22 +101,60 @@ def summarize(res: dict) -> dict:
     return {**res, "percent": round(p * 100, 1), "level": risk_level(p), "color": risk_color(p)}
 
 
+# ------------------------------------------------------------------ caches
+_PRED, _PRED_LOCK = OrderedDict(), threading.Lock()
+
+
+def predict_all(row: pd.DataFrame) -> dict:
+    """Prediction + SHAP for every target; cached per unique input (top MAX_TOP_K factors)."""
+    key = tuple(row.iloc[0].tolist())
+    with _PRED_LOCK:
+        if key in _PRED:
+            _PRED.move_to_end(key)
+            return _PRED[key]
+    X = encode_features(row)
+    out = {t: summarize(explain.explain_patient(t, X, top_k=MAX_TOP_K)) for t in TARGETS}
+    with _PRED_LOCK:
+        _PRED[key] = out
+        while len(_PRED) > 256:
+            _PRED.popitem(last=False)
+    return out
+
+
+_FILES = {}
+
+
+def cached_file(path: Path, loader):
+    """Re-read a results file only when it changes on disk."""
+    mtime = path.stat().st_mtime
+    hit = _FILES.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    val = loader(path)
+    _FILES[path] = (mtime, val)
+    return val
+
+
 # ------------------------------------------------------------------ app
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    for t in TARGETS:                  # warm up models + SHAP explainers once
+    for t in TARGETS:                      # warm models + SHAP explainers + global importance
         explain._load(t)
+        explain.global_importance(t)
     yield
 
 
-app = FastAPI(title="Cardio Risk API", version="1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="Cardio Risk API", version="1.1", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(CORSMiddleware, allow_methods=["*"], allow_headers=["*"],
+                   allow_origins=os.environ.get("CORS_ORIGINS",
+                                                "http://localhost:5173,http://127.0.0.1:5173").split(","))
 
 
 class PredictRequest(BaseModel):
     features: dict[str, Any] = Field(default_factory=dict,
         description="Raw feature values keyed by column name. Missing ones use dataset median/mode.")
-    top_k: int = Field(10, ge=1, le=30)
+    top_k: int = Field(10, ge=1, le=MAX_TOP_K)
 
 
 @app.get("/health")
@@ -130,15 +164,14 @@ def health():
 
 @app.get("/schema")
 def schema():
-    """Input form definition (type, range/options, default) for every feature."""
     return {"features": SCHEMA, "disclaimer": DISCLAIMER}
 
 
 @app.post("/predict")
 def predict(req: PredictRequest):
     row, defaults_used, warnings = build_row(req.features)
-    X = encode_features(row)
-    out = {t: summarize(explain.explain_patient(t, X, top_k=req.top_k)) for t in TARGETS}
+    full = predict_all(row)
+    out = {t: {**r, "factors": r["factors"][:req.top_k]} for t, r in full.items()}
     cad = out["CAD"]
     return {
         "cad": {**cad, "prediction": "CAD" if cad["probability"] >= 0.5 else "Normal"},
@@ -156,20 +189,17 @@ def patient_count():
 
 @app.get("/patients/{idx}")
 def get_patient(idx: int):
-    """A real record from the dataset (inputs + ground truth) for demos."""
     if not 0 <= idx < len(RAW):
         raise HTTPException(404, f"Index must be 0..{len(RAW) - 1}")
     r = RAW.iloc[idx]
     conv = lambda v: v.item() if hasattr(v, "item") else v
-    labels = {k: int(v.iloc[idx]) for k, v in make_targets(RAW).items()}
     return {"index": idx,
             "features": {c: conv(r[c]) for c in INPUT_COLS},
-            "ground_truth": labels}
+            "ground_truth": {k: int(v[idx]) for k, v in LABELS.items()}}
 
 
 @app.get("/importance/{target}")
 def importance(target: str, top_k: int = Query(15, ge=1, le=50)):
-    """Global importance (mean |SHAP|) for one target."""
     target = target.upper()
     if target not in TARGETS:
         raise HTTPException(404, f"target must be one of {TARGETS}")
@@ -180,19 +210,17 @@ def importance(target: str, top_k: int = Query(15, ge=1, le=50)):
 
 @app.get("/metrics")
 def metrics():
-    """Cross-validation results + which model was chosen per target."""
     cv_path, best_path = MODELS_DIR / "cv_results.csv", MODELS_DIR / "best_models.json"
     if not cv_path.exists() or not best_path.exists():
         raise HTTPException(404, "Run backend/train.py first.")
-    return {"cv_results": pd.read_csv(cv_path).to_dict(orient="records"),
-            "best_models": json.loads(best_path.read_text()),
+    return {"cv_results": cached_file(cv_path, lambda p: pd.read_csv(p).to_dict(orient="records")),
+            "best_models": cached_file(best_path, lambda p: json.loads(p.read_text())),
             "cv": "5-fold stratified, repeated 3x", "disclaimer": DISCLAIMER}
 
 
 @app.get("/evaluation")
 def evaluation():
-    """Nested-CV estimate, ROC curves, confusion matrices / operating points (from evaluate.py)."""
     p = MODELS_DIR / "eval_extra.json"
     if not p.exists():
         raise HTTPException(404, "Run backend/evaluate.py first.")
-    return json.loads(p.read_text())
+    return cached_file(p, lambda q: json.loads(q.read_text()))

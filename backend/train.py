@@ -19,7 +19,8 @@ SCORING = ["accuracy", "precision", "recall", "f1", "roc_auc"]
 
 
 def candidates(X, pos_weight):
-    """name -> Pipeline. Trees don't need scaling."""
+    """name -> Pipeline. Trees don't need scaling. Models use n_jobs=1 because
+    parallelism happens at the CV-fold level (avoids CPU oversubscription)."""
     return {
         "LogReg(C=1)": Pipeline([("pre", make_preprocessor(X)),
             ("clf", LogisticRegression(C=1, max_iter=3000, class_weight="balanced"))]),
@@ -27,7 +28,7 @@ def candidates(X, pos_weight):
             ("clf", LogisticRegression(C=0.1, max_iter=3000, class_weight="balanced"))]),
         "RandomForest": Pipeline([("pre", make_preprocessor(X, scale=False)),
             ("clf", RandomForestClassifier(n_estimators=400, min_samples_leaf=3,
-                class_weight="balanced", random_state=SEED, n_jobs=-1))]),
+                class_weight="balanced", random_state=SEED, n_jobs=1))]),
         "XGBoost": Pipeline([("pre", make_preprocessor(X, scale=False)),
             ("clf", XGBClassifier(n_estimators=300, max_depth=3, learning_rate=0.05,
                 subsample=0.8, colsample_bytree=0.8, reg_lambda=2.0,
@@ -47,7 +48,7 @@ def main():
     for t in TARGETS:
         pos_weight = (y[t] == 0).sum() / (y[t] == 1).sum()
         for name, pipe in candidates(X, pos_weight).items():
-            s = cross_validate(pipe, X, y[t], cv=cv, scoring=SCORING, n_jobs=1)
+            s = cross_validate(pipe, X, y[t], cv=cv, scoring=SCORING, n_jobs=-1)
             row = {"target": t, "model": name}
             for m in SCORING:
                 row[m] = round(s[f"test_{m}"].mean(), 3)
@@ -65,7 +66,8 @@ def main():
         pos_weight = (y[t] == 0).sum() / (y[t] == 1).sum()
         pipe = candidates(X, pos_weight)[best.model]
         fitted = clone(pipe).fit(X, y[t])                     # for SHAP
-        calibrated = CalibratedClassifierCV(clone(pipe), method="sigmoid", cv=5).fit(X, y[t])
+        # ensemble=False: one base model + sigmoid calibrator -> 5x smaller file, faster inference
+        calibrated = CalibratedClassifierCV(clone(pipe), method="sigmoid", cv=5, ensemble=False).fit(X, y[t])
         joblib.dump({"pipeline": fitted, "calibrated": calibrated,
                      "features": list(X.columns), "model_name": best.model},
                     MODELS_DIR / f"{t}.joblib")

@@ -1,5 +1,5 @@
 import { Component, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls, Html, useGLTF } from "@react-three/drei";
 import * as THREE from "three";
 
@@ -15,18 +15,48 @@ const CENTER = [0, 0, 0];             // model is pre-centred at the origin
 const SCALE = 3.2 / 156;                 // model height 156 -> 3.2 scene units
 const RADIUS = 1.7;                      // artery tube radius (model units)
 
+const TAPER = 0.6;   // tube radius shrinks to 40% at the distal end
+
 function Vessel({ id, color, selected, onSelect }) {
   const [hover, setHover] = useState(false);
-  const pts = useMemo(() => PATHS[id].map((p) => new THREE.Vector3(...p)), [id]);
-  const geo = useMemo(() => new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 80, RADIUS, 12), [pts]);
-  const glow = selected ? 0.9 : hover ? 0.55 : 0.25;
+  const mat = useRef();
+  const { geo, halo } = useMemo(() => {
+    const curve = new THREE.CatmullRomCurve3(PATHS[id].map((p) => new THREE.Vector3(...p)));
+    const N = 90, R = 12;
+    const make = (r) => {                       // tube whose radius tapers along the path
+      const g = new THREE.TubeGeometry(curve, N, r, R, false);
+      const pos = g.attributes.position, c = new THREE.Vector3(), v = new THREE.Vector3();
+      for (let i = 0; i <= N; i++) {
+        curve.getPointAt(i / N, c);
+        const f = 1 - TAPER * (i / N);
+        for (let j = 0; j <= R; j++) {
+          const n = i * (R + 1) + j;
+          v.fromBufferAttribute(pos, n).sub(c).multiplyScalar(f).add(c);
+          pos.setXYZ(n, v.x, v.y, v.z);
+        }
+      }
+      g.computeVertexNormals();
+      return g;
+    };
+    return { geo: make(RADIUS), halo: make(RADIUS * 2.2) };
+  }, [id]);
+  useFrame(({ clock }) => {                      // selected artery pulses
+    if (mat.current) mat.current.emissiveIntensity = selected ? 0.9 + 0.5 * Math.sin(clock.elapsedTime * 4) : hover ? 0.55 : 0.25;
+  });
   return (
-    <mesh geometry={geo}
-      onClick={(e) => { e.stopPropagation(); onSelect(id); }}
-      onPointerOver={(e) => { e.stopPropagation(); setHover(true); document.body.style.cursor = "pointer"; }}
-      onPointerOut={() => { setHover(false); document.body.style.cursor = "auto"; }}>
-      <meshStandardMaterial color={color} emissive={color} emissiveIntensity={glow} />
-    </mesh>
+    <group>
+      <mesh geometry={geo}
+        onClick={(e) => { e.stopPropagation(); onSelect(id); }}
+        onPointerOver={(e) => { e.stopPropagation(); setHover(true); document.body.style.cursor = "pointer"; }}
+        onPointerOut={() => { setHover(false); document.body.style.cursor = "auto"; }}>
+        <meshStandardMaterial ref={mat} color={color} emissive={color} />
+      </mesh>
+      {selected && (
+        <mesh geometry={halo} raycast={() => null}>
+          <meshBasicMaterial color={color} transparent opacity={0.28} depthWrite={false} />
+        </mesh>
+      )}
+    </group>
   );
 }
 
@@ -82,6 +112,12 @@ function HeartCanvas({ colors, pcts, selected, onSelect }) {
   const ctl = useRef();
   return (
     <>
+    <div style={{ position: "absolute", top: 8, left: 8, zIndex: 2, fontSize: 11, color: "#cbd5e1", background: "#0b1220cc", padding: "6px 8px", borderRadius: 6 }}>
+      <div style={{ marginBottom: 3 }}>Predicted stenosis probability</div>
+      <div style={{ width: 150, height: 8, borderRadius: 4, background: "linear-gradient(90deg,#22c55e,#facc15,#ef4444)" }} />
+      <div style={{ display: "flex", justifyContent: "space-between", width: 150, marginTop: 2 }}><span>0%</span><span>33%</span><span>66%</span><span>100%</span></div>
+      <div style={{ display: "flex", justifyContent: "space-between", width: 150 }}><span>low</span><span>moderate</span><span>high</span></div>
+    </div>
     <button onClick={() => ctl.current?.reset()}
       style={{ position: "absolute", top: 8, right: 8, zIndex: 2, background: "#1d4ed8", border: 0, borderRadius: 6, padding: "4px 10px" }}>
       Reset view
