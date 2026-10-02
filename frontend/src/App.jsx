@@ -75,7 +75,7 @@ export default function App() {
         </aside>
 
         <main className="card canvas">
-          <Heart colors={colors} selected={sel} onSelect={setSel} />
+          <Heart colors={colors} pcts={res ? Object.fromEntries(Object.entries(res.vessels).map(([k, v]) => [k, Math.round(v.percent)])) : null} selected={sel} onSelect={setSel} />
           <div className="hint">Drag to rotate · scroll to zoom · click an artery</div>
         </main>
 
