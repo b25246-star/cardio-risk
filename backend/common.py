@@ -1,4 +1,5 @@
-"""Shared data loading + preprocessing (used by training and, later, the API)."""
+"""Shared data loading + preprocessing (used by training and the API)."""
+import os
 from pathlib import Path
 import pandas as pd
 from sklearn.compose import ColumnTransformer
@@ -14,6 +15,13 @@ CONSTANT_COLS = ["Exertional CP"]
 CAT_COLS = ["BBB", "Region RWMA"]
 TARGETS = ["CAD", "LAD", "LCX", "RCA"]
 
+# Engineered features (computed from the clinical inputs only - no target information).
+# Set env CARDIO_FE=0 to switch them off, e.g. to measure their effect with evaluate.py.
+USE_FE = os.environ.get("CARDIO_FE", "1") == "1"
+RISK_FACTORS = ["HTN", "DM", "Current Smoker", "EX-Smoker", "FH", "DLP", "Obesity"]
+ECG_FLAGS = ["Q Wave", "St Elevation", "St Depression", "Tinversion", "LVH", "Poor R Progression"]
+ENGINEERED = ["LDL_HDL", "TG_HDL", "RiskFactorCount", "ECGAbnormalCount"]
+
 
 def load_raw() -> pd.DataFrame:
     return pd.read_csv(DATA_FILE)
@@ -28,6 +36,22 @@ def make_targets(df: pd.DataFrame) -> dict:
     }
 
 
+def add_engineered(X: pd.DataFrame) -> pd.DataFrame:
+    """Ratios and counts built from already-encoded numeric inputs. Skips any that can't be built."""
+    X = X.copy()
+    if {"LDL", "HDL"} <= set(X.columns):
+        X["LDL_HDL"] = X["LDL"] / X["HDL"].clip(lower=1)
+    if {"TG", "HDL"} <= set(X.columns):
+        X["TG_HDL"] = X["TG"] / X["HDL"].clip(lower=1)
+    rf = [c for c in RISK_FACTORS if c in X.columns]
+    if rf:
+        X["RiskFactorCount"] = X[rf].sum(axis=1)
+    ecg = [c for c in ECG_FLAGS if c in X.columns]
+    if ecg:
+        X["ECGAbnormalCount"] = X[ecg].sum(axis=1)
+    return X
+
+
 def encode_features(df: pd.DataFrame) -> pd.DataFrame:
     """Turn raw rows into the model input table (no targets)."""
     X = df.drop(columns=[c for c in LEAKAGE_COLS + CONSTANT_COLS if c in df.columns]).copy()
@@ -40,7 +64,7 @@ def encode_features(df: pd.DataFrame) -> pd.DataFrame:
             continue
         if not pd.api.types.is_numeric_dtype(X[c]):
             X[c] = (X[c] == "Y").astype(int)
-    return X
+    return add_engineered(X) if USE_FE else X
 
 
 def make_preprocessor(X: pd.DataFrame, scale: bool = True) -> ColumnTransformer:

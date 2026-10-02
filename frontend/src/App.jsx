@@ -69,31 +69,46 @@ export default function App() {
   const [topK, setTopK] = useState(8);
   const [navOpen, setNavOpen] = useState(false);
   const [loaded, setLoaded] = useState(null);
+  const [auto, setAuto] = useState(false);     // live update on every edit
+  const [dirty, setDirty] = useState(false);   // inputs changed since last prediction
+  const [busy, setBusy] = useState(false);
+  const ctlRef = useRef(null);
 
   useEffect(() => {
     j("/schema").then((s) => setSchema(s.features)).catch((e) => setErr("API unreachable: " + e.message));
     j("/metrics").then((m) => setMetrics(m.best_models)).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    if (!schema) return;
-    const ctl = new AbortController();           // cancel stale requests -> no out-of-order results
-    const t = setTimeout(() => {
-      j("/predict", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ features: f, top_k: topK }), signal: ctl.signal })
-        .then((r) => { setRes(r); setErr(""); })
-        .catch((e) => e.name !== "AbortError" && setErr(e.message));
-    }, 350);
-    return () => { clearTimeout(t); ctl.abort(); };
-  }, [f, schema, topK]);
+  const runPredict = (features = f) => {
+    ctlRef.current?.abort();                    // drop any in-flight request (no out-of-order results)
+    const ctl = new AbortController();
+    ctlRef.current = ctl;
+    setBusy(true);
+    j("/predict", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ features, top_k: topK }), signal: ctl.signal })
+      .then((r) => { setRes(r); setErr(""); setDirty(false); })
+      .catch((e) => e.name !== "AbortError" && setErr(e.message))
+      .finally(() => { if (ctlRef.current === ctl) setBusy(false); });
+  };
 
+  // first prediction once the schema is ready, and again when the factor count changes
+  useEffect(() => { if (schema) runPredict(); }, [schema, topK]); // eslint-disable-line react-hooks/exhaustive-deps
+  // live mode: predict 350 ms after the last edit
+  useEffect(() => {
+    if (!schema || !auto || !dirty) return;
+    const t = setTimeout(() => runPredict(), 350);
+    return () => clearTimeout(t);
+  }, [f, auto, dirty, schema]);                                   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const edit = (next) => { setF(next); setDirty(true); };
   const loadPatient = (i) => {
     const n = Math.max(0, Number(i) || 0);
     setIdx(n);
-    j("/patients/" + n).then((p) => { setF(p.features); setLoaded(n); setErr(""); })
+    j("/patients/" + n)
+      .then((p) => { setF(p.features); setLoaded(n); setErr(""); runPredict(p.features); })
       .catch((e) => setErr("Could not load patient " + n + ": " + e.message));
   };
-  const reset = () => { setF({}); setLoaded(null); };
+  const reset = () => { setF({}); setLoaded(null); runPredict({}); };
 
   const items = res ? { CAD: res.cad, ...res.vessels } : {};
   const cur = items[sel];
@@ -103,7 +118,7 @@ export default function App() {
 
   const renderField = (k) => {
     const s = schema[k], v = f[k] ?? s.default;
-    const set = (x) => setF({ ...f, [k]: x });
+    const set = (x) => edit({ ...f, [k]: x });
     const n = NORMAL[k];
     const isSel = s.type === "categorical" || (s.min === 0 && s.max === 1);
     return (
@@ -160,6 +175,7 @@ export default function App() {
               <Menu label="Factors" value={String(topK)} align="right"
                 items={[5, 8, 12].map((n) => ({ label: "Top " + n, value: String(n), onSelect: () => setTopK(n) }))} />
               <Menu label="Actions" align="right" items={[
+                { label: "Predict now", onSelect: () => runPredict() },
                 { label: "Reset to defaults", onSelect: reset },
                 { label: "Load random patient", onSelect: () => loadPatient(Math.floor(Math.random() * 300)) },
                 { label: "Print report", onSelect: () => window.print() },
@@ -201,6 +217,16 @@ export default function App() {
                 ) : null;
               })}
               <p className="mut note">Unset fields use dataset median/mode.</p>
+              <div className="actions">
+                <button className="btn primary wide" disabled={!schema || busy} onClick={() => runPredict()}>
+                  {busy ? "Predicting…" : dirty ? "Predict ●" : "Predict"}
+                </button>
+                <button className="btn" disabled={!schema} onClick={reset}>Reset</button>
+                <label className="switch">
+                  <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+                  <span>Live update</span>
+                </label>
+              </div>
             </aside>
 
             <main className="card canvas">
@@ -209,8 +235,9 @@ export default function App() {
               <div className="hint">Drag to rotate · scroll to zoom · click an artery</div>
             </main>
 
-            <section className="card results">
+            <section className={"card results" + (dirty && !auto ? " stale-on" : "")}>
               {err && <p className="err">{err}</p>}
+              {dirty && !auto && <p className="stale">Inputs changed. Click <b>Predict</b> to update the results.</p>}
               <div className="cards">
                 {Object.entries(items).map(([k, v]) => (
                   <button key={k} className={"risk " + levelClass(v.percent) + (sel === k ? " on" : "")} onClick={() => setSel(k)}

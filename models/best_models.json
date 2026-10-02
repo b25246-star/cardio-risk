@@ -1,18 +1,18 @@
 {
   "CAD": {
-    "model": "LogReg(C=0.1)",
-    "roc_auc": 0.928
+    "model": "ExtraTrees",
+    "roc_auc": 0.933
   },
   "LAD": {
     "model": "RandomForest",
-    "roc_auc": 0.856
+    "roc_auc": 0.855
   },
   "LCX": {
     "model": "XGBoost",
-    "roc_auc": 0.745
+    "roc_auc": 0.736
   },
   "RCA": {
-    "model": "LogReg(C=0.1)",
-    "roc_auc": 0.719
+    "model": "ExtraTrees",
+    "roc_auc": 0.738
   }
 }

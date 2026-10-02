@@ -100,3 +100,12 @@ tr.best td{background:#1b2740;font-weight:600}
 }
 @media print{.side,.top,.warn,.tools{display:none}.shell{display:block}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* manual predict controls */
+.actions{position:sticky;bottom:-14px;margin:10px -14px -14px;padding:10px 14px;background:var(--card);border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.btn.wide{flex:1;justify-content:center;font-weight:600}
+.btn:disabled{opacity:.6;cursor:default}
+.switch{display:flex;align-items:center;gap:6px;margin:0;width:100%;cursor:pointer}
+.switch input{width:auto;margin:0}
+.stale{background:#2a210a;border:1px solid #854d0e;color:#fde68a;border-radius:8px;padding:7px 10px;margin:0 0 10px}
+.stale-on .cards,.stale-on .fac{opacity:.45;transition:opacity .15s}
